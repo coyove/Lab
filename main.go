@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -18,6 +20,13 @@ import (
 	"golang.org/x/text/encoding/traditionalchinese"
 	"golang.org/x/text/transform"
 )
+
+var solrEndpoint = "http://127.0.0.1:8983/solr/new_core/update/json/docs"
+
+func SHA1ForGUID(in string) string {
+	x := sha1.Sum([]byte(in))
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", x[:4], x[4:6], x[6:8], x[8:10], x[10:16])
+}
 
 func CleanText(in string) string {
 	return regexp.MustCompile(`(\n|\t|\s+)`).ReplaceAllString(in, " ")
@@ -103,6 +112,21 @@ REDO:
 	return x
 }
 
+func add(json []byte) {
+	req, _ := http.NewRequest("POST", solrEndpoint, bytes.NewReader(json))
+	req.Header.Add("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer resp.Body.Close()
+
+	log.Println(resp.Status)
+	buf, _ := ioutil.ReadAll(resp.Body)
+	log.Println(string(buf))
+}
+
 func walk(baseurl string, buf []byte) {
 	charset := "utf-8"
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(buf))
@@ -170,6 +194,7 @@ SKIP:
 	}
 
 	p := Page{}
+	p.ID = SHA1ForGUID(baseurl)
 	p.Content = CleanText(doc.Text())
 	p.URL = baseurl
 	p.Updated = uint32(time.Now().Unix())
@@ -205,7 +230,7 @@ SKIP:
 	})
 
 	j, _ := json.Marshal(&p)
-	log.Println(string(j))
+	add(j)
 }
 
 func crawl(uri string) {
