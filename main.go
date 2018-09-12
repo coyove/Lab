@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/sha1"
 	"encoding/json"
@@ -17,6 +16,8 @@ import (
 	"time"
 	"unicode"
 
+	_xhtml "golang.org/x/net/html"
+
 	"github.com/PuerkitoBio/goquery"
 	"golang.org/x/text/encoding/japanese"
 	"golang.org/x/text/encoding/korean"
@@ -26,6 +27,7 @@ import (
 )
 
 var solrEndpoint = "http://127.0.0.1:8983/solr/new_core/update/json/docs?commit=true"
+var solrGetEndpoint = "http://127.0.0.1:8983/solr/new_core/get"
 
 const maxResponseSize = 5 * 1024 * 1024
 
@@ -123,42 +125,9 @@ REDO:
 	return x
 }
 
-func ExtractPlainText(html []byte) (string, string, string) {
-	r := bufio.NewReader(bytes.NewReader(html))
+func ExtractPlainText(doc *goquery.Document) (string, string, string) {
 	en, cn, jp := bytes.Buffer{}, bytes.Buffer{}, bytes.Buffer{}
-	readUntil := func(end rune) (string, bool, string) {
-		tmp := bytes.Buffer{}
-		tag := ""
-		b1, _ := r.Peek(1)
-		endtag := len(b1) > 0 && b1[0] == '/'
 
-		for {
-			b, _, err := r.ReadRune()
-			if err != nil {
-				break
-			}
-			tmp.WriteRune(b)
-			if b == end {
-				break
-			}
-			if b == ' ' && tag == "" {
-				tag = tmp.String()
-			}
-		}
-
-		if tmp.Len() == 0 || tmp.Bytes()[tmp.Len()-1] != byte(end) {
-			return "", false, ""
-		}
-
-		if tag == "" {
-			tag = tmp.String()[:tmp.Len()-1]
-		}
-
-		if endtag {
-			tag = tag[1:]
-		}
-		return strings.ToLower(tag), endtag, tmp.String()
-	}
 	writeSpace := func(buf *bytes.Buffer) {
 		if buf.Len() > 0 {
 			if buf.Bytes()[buf.Len()-1] == ' ' {
@@ -168,50 +137,49 @@ func ExtractPlainText(html []byte) (string, string, string) {
 		buf.WriteRune(' ')
 	}
 
-	tagstack := make([]string, 0)
-	for {
-		r, _, err := r.ReadRune()
-		if err != nil {
-			break
-		}
-
-		if r == '<' {
-			tag, endtag, raw := readUntil('>')
-			if endtag {
-				i := len(tagstack) - 1
-				for ; i >= 0; i-- {
-					if tagstack[i] == tag {
-						break
-					}
-				}
-				if i >= 0 {
-					tagstack = tagstack[:i]
-				}
-				continue
-			}
-			if len(raw) > 512 {
+	fill := func(text string) {
+		for _, r := range text {
+			if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+				writeSpace(&en)
+				writeSpace(&cn)
+				writeSpace(&jp)
+			} else if IsJapanese(r) {
+				jp.WriteRune(r)
+			} else if IsChinese(r) {
+				jp.WriteRune(r)
+				cn.WriteRune(r)
+			} else {
+				jp.WriteRune(r)
+				cn.WriteRune(r)
 				en.WriteRune(r)
-				en.WriteString(raw)
-				continue
 			}
-			tagstack = append(tagstack, tag)
-			continue
 		}
 
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
-			writeSpace(&jp)
-			writeSpace(&cn)
-			writeSpace(&en)
-		} else if IsJapanese(r) {
-			jp.WriteRune(r)
-		} else if IsChinese(r) {
-			cn.WriteRune(r)
-			jp.WriteRune(r)
-		} else {
-			en.WriteRune(r)
-			cn.WriteRune(r)
-			jp.WriteRune(r)
+		if len(text) > 0 {
+			jp.WriteRune(' ')
+			cn.WriteRune(' ')
+			en.WriteRune(' ')
 		}
+	}
+
+	var walk func(n *_xhtml.Node)
+	walk = func(n *_xhtml.Node) {
+		if n.Type == _xhtml.TextNode {
+			fill(n.Data)
+		}
+		for i := n.FirstChild; i != nil; i = i.NextSibling {
+			if i.Type == _xhtml.ElementNode {
+				switch i.Data {
+				case "script", "link":
+					continue
+				}
+			}
+			walk(i)
+		}
+	}
+
+	for _, n := range doc.Nodes {
+		walk(n)
 	}
 	return _html.UnescapeString(en.String()), _html.UnescapeString(cn.String()), _html.UnescapeString(jp.String())
 }
@@ -299,7 +267,7 @@ SKIP:
 
 	p := Page{}
 	p.ID = SHA1ForGUID(baseurl)
-	p.ContentEN, p.ContentCN, p.ContentJP = ExtractPlainText(buf)
+	p.ContentEN, p.ContentCN, p.ContentJP = ExtractPlainText(doc)
 	p.URL = baseurl
 	p.Updated = uint32(time.Now().Unix())
 	if title := doc.Find("title").First(); title != nil {
@@ -313,13 +281,13 @@ SKIP:
 	}
 
 	p.H1 = make([]string, 0)
-	doc.Find("h1").Each(func(i int, s *goquery.Selection) { p.H1 = append(p.H1, s.Text()) })
+	doc.Find("h1").Each(func(i int, s *goquery.Selection) { p.H1 = append(p.H1, CleanText(s.Text())) })
 	p.H2 = make([]string, 0)
-	doc.Find("h2").Each(func(i int, s *goquery.Selection) { p.H2 = append(p.H2, s.Text()) })
+	doc.Find("h2").Each(func(i int, s *goquery.Selection) { p.H2 = append(p.H2, CleanText(s.Text())) })
 	p.H3 = make([]string, 0)
-	doc.Find("h3").Each(func(i int, s *goquery.Selection) { p.H3 = append(p.H3, s.Text()) })
+	doc.Find("h3").Each(func(i int, s *goquery.Selection) { p.H3 = append(p.H3, CleanText(s.Text())) })
 	p.H4 = make([]string, 0)
-	doc.Find("h4").Each(func(i int, s *goquery.Selection) { p.H4 = append(p.H4, s.Text()) })
+	doc.Find("h4").Each(func(i int, s *goquery.Selection) { p.H4 = append(p.H4, CleanText(s.Text())) })
 
 	p.Links = make([]string, 0)
 	links := make([]string, 0)
@@ -328,7 +296,7 @@ SKIP:
 		if ok && !strings.HasPrefix(href, "javascript:") {
 			links = append(links, JoinURL(baseurl, href))
 		}
-		p.Links = append(p.Links, s.Text())
+		p.Links = append(p.Links, CleanText(s.Text()))
 	})
 
 	j, _ := json.Marshal(&p)
@@ -339,15 +307,33 @@ SKIP:
 }
 
 func crawl(uri string) []string {
+	ask, _ := http.NewRequest("GET", solrGetEndpoint+"?id="+SHA1ForGUID(uri), nil)
+	resp, err := http.DefaultClient.Do(ask)
+	if err == nil {
+		defer resp.Body.Close()
+		st, _ := ioutil.ReadAll(resp.Body)
+		if len(st) > 0 {
+			m := map[string]interface{}{}
+			json.Unmarshal(st, &m)
+			x, _ := m["doc"].(map[string]interface{})
+			if x != nil && x["updated"] != nil {
+				ts := int64(x["updated"].([]interface{})[0].(float64))
+				if time.Now().Unix()-ts < 86400 {
+					log.Println("omit", uri)
+					return nil
+				}
+			}
+		}
+	}
+
 	_up, _ := url.Parse("http://127.0.0.01:8100")
 	c := &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(_up),
 		},
 	}
-	c = http.DefaultClient
 	req, _ := http.NewRequest("GET", uri, nil)
-	resp, err := c.Do(req)
+	resp, err = c.Do(req)
 	if err != nil {
 		log.Println(err)
 		return nil
@@ -383,7 +369,7 @@ func crawl(uri string) []string {
 func main() {
 	log.SetFlags(log.Lshortfile | log.Lmicroseconds)
 
-	links := []string{("http://zhstatic.zhihu.com/assets/zhihu/publish-license.jpg")}
+	links := []string{("http://stackoverflow.com")}
 
 	for len(links) > 0 {
 		x := links[0]
