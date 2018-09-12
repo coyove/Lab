@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"encoding/json"
+	"flag"
 	"fmt"
 	_html "html"
 	"io"
@@ -28,6 +29,7 @@ import (
 
 var solrEndpoint = "http://127.0.0.1:8983/solr/new_core/update/json/docs?commit=true"
 var solrGetEndpoint = "http://127.0.0.1:8983/solr/new_core/get"
+var disableProxy = flag.Bool("np", false, "")
 
 const maxResponseSize = 5 * 1024 * 1024
 
@@ -332,6 +334,9 @@ func crawl(uri string) []string {
 			Proxy: http.ProxyURL(_up),
 		},
 	}
+	if *disableProxy {
+		c = http.DefaultClient
+	}
 	req, _ := http.NewRequest("GET", uri, nil)
 	resp, err = c.Do(req)
 	if err != nil {
@@ -367,6 +372,7 @@ func crawl(uri string) []string {
 }
 
 func main() {
+	flag.Parse()
 	log.SetFlags(log.Lshortfile | log.Lmicroseconds)
 
 	links := []string{("http://stackoverflow.com")}
