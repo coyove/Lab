@@ -316,16 +316,21 @@ func crawl(uri string) []string {
 		st, _ := ioutil.ReadAll(resp.Body)
 		if len(st) > 0 {
 			m := map[string]interface{}{}
-			json.Unmarshal(st, &m)
-			x, _ := m["doc"].(map[string]interface{})
-			if x != nil && x["updated"] != nil {
-				ts := int64(x["updated"].([]interface{})[0].(float64))
-				if time.Now().Unix()-ts < 86400 {
-					log.Println("omit", uri)
-					return nil
+			if json.Unmarshal(st, &m) == nil {
+				x, _ := m["doc"].(map[string]interface{})
+				if x != nil && x["updated"] != nil {
+					ts := int64(x["updated"].([]interface{})[0].(float64))
+					if time.Now().Unix()-ts < 86400 {
+						log.Println("omit", uri)
+						return nil
+					}
 				}
+			} else {
+				log.Println(string(st))
 			}
 		}
+	} else {
+		log.Println(err)
 	}
 
 	_up, _ := url.Parse("http://127.0.0.01:8100")
