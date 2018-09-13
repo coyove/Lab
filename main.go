@@ -27,15 +27,14 @@ import (
 	"golang.org/x/text/transform"
 )
 
-var solrEndpoint = "http://127.0.0.1:8983/solr/new_core/update/json/docs?commit=true"
-var solrGetEndpoint = "http://127.0.0.1:8983/solr/new_core/get"
+var esCreateEndpoint = "http://127.0.0.1:9200/main/root/%s/_create"
+var esGetEndpoint = "http://127.0.0.1:9200/main/root/%s"
 var disableProxy = flag.Bool("np", false, "")
 
 const maxResponseSize = 5 * 1024 * 1024
 
-func SHA1ForGUID(in string) string {
-	x := sha1.Sum([]byte(in))
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", x[:4], x[4:6], x[6:8], x[8:10], x[10:16])
+func shaid(in string) string {
+	return fmt.Sprintf("%x", sha1.Sum([]byte(in)))
 }
 
 func IsChinese(r rune) bool {
@@ -62,9 +61,10 @@ type Page struct {
 	H3          []string `json:"h3"`
 	H4          []string `json:"h4"`
 	Links       []string `json:"links"`
-	ContentEN   string   `json:"content_txt_en"`
-	ContentCN   string   `json:"content_txt_cn"`
-	ContentJP   string   `json:"content_txt_jp"`
+	LinkURLs    []string `json:"linkurls"`
+	ContentEN   string   `json:"content_en"`
+	ContentCN   string   `json:"content_cn"`
+	ContentJP   string   `json:"content_jp"`
 }
 
 func JoinURL(baseurl, url2 string) string {
@@ -186,8 +186,8 @@ func ExtractPlainText(doc *goquery.Document) (string, string, string) {
 	return _html.UnescapeString(en.String()), _html.UnescapeString(cn.String()), _html.UnescapeString(jp.String())
 }
 
-func add(json []byte) {
-	req, _ := http.NewRequest("POST", solrEndpoint, bytes.NewReader(json))
+func add(id string, json []byte) {
+	req, _ := http.NewRequest("POST", fmt.Sprintf(esCreateEndpoint, id), bytes.NewReader(json))
 	req.Header.Add("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -268,7 +268,7 @@ SKIP:
 	}
 
 	p := Page{}
-	p.ID = SHA1ForGUID(baseurl)
+	p.ID = shaid(baseurl)
 	p.ContentEN, p.ContentCN, p.ContentJP = ExtractPlainText(doc)
 	p.URL = baseurl
 	p.Updated = uint32(time.Now().Unix())
@@ -291,25 +291,27 @@ SKIP:
 	p.H4 = make([]string, 0)
 	doc.Find("h4").Each(func(i int, s *goquery.Selection) { p.H4 = append(p.H4, CleanText(s.Text())) })
 
-	p.Links = make([]string, 0)
+	p.Links, p.LinkURLs = make([]string, 0), make([]string, 0)
 	links := make([]string, 0)
 	doc.Find("a").Each(func(i int, s *goquery.Selection) {
 		href, ok := s.Attr("href")
 		if ok && !strings.HasPrefix(href, "javascript:") {
-			links = append(links, JoinURL(baseurl, href))
+			ju := JoinURL(baseurl, href)
+			links = append(links, ju)
+			p.LinkURLs = append(p.LinkURLs, ju)
 		}
 		p.Links = append(p.Links, CleanText(s.Text()))
 	})
 
 	j, _ := json.Marshal(&p)
-	add(j)
+	add(p.ID, j)
 	// log.Println(string(j))
 	// log.Println(p.ContentCN)
 	return links
 }
 
 func crawl(uri string) []string {
-	ask, _ := http.NewRequest("GET", solrGetEndpoint+"?id="+SHA1ForGUID(uri), nil)
+	ask, _ := http.NewRequest("GET", fmt.Sprintf(esGetEndpoint, shaid(uri)), nil)
 	resp, err := http.DefaultClient.Do(ask)
 	if err == nil {
 		defer resp.Body.Close()
@@ -317,12 +319,20 @@ func crawl(uri string) []string {
 		if len(st) > 0 {
 			m := map[string]interface{}{}
 			if json.Unmarshal(st, &m) == nil {
-				x, _ := m["doc"].(map[string]interface{})
-				if x != nil && x["updated"] != nil {
-					ts := int64(x["updated"].([]interface{})[0].(float64))
+				found, _ := m["found"].(bool)
+				if found {
+					m = m["_source"].(map[string]interface{})
+					ts := int64(m["updated"].(float64))
 					if time.Now().Unix()-ts < 86400 {
-						log.Println("omit", uri)
-						return nil
+
+						linkurls := m["linkurls"].([]interface{})
+						urls := make([]string, len(linkurls))
+						for i, u := range linkurls {
+							urls[i] = u.(string)
+						}
+
+						log.Println(len(linkurls), "omit", uri)
+						return urls
 					}
 				}
 			} else {
