@@ -52,6 +52,7 @@ func CleanText(in string) string {
 type Page struct {
 	ID          string   `json:"id"`
 	URL         string   `json:"url"`
+	Host        string   `json:"host"`
 	Updated     uint32   `json:"updated"`
 	Title       string   `json:"title"`
 	Keywords    string   `json:"keywords"`
@@ -271,6 +272,8 @@ SKIP:
 	p.ID = shaid(baseurl)
 	p.ContentEN, p.ContentCN, p.ContentJP = ExtractPlainText(doc)
 	p.URL = baseurl
+	_baseurl, _ := url.Parse(baseurl)
+	p.Host = _baseurl.Host
 	p.Updated = uint32(time.Now().Unix())
 	if title := doc.Find("title").First(); title != nil {
 		p.Title = CleanText(title.Text())
